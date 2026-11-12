@@ -1,0 +1,14 @@
+# Logs + local run state — never committed
+*.log
+/tmp/
+server/*.log
+tests/*.log
+
+# Node (no dependencies today, but keep the rule for later)
+node_modules/
+
+# macOS
+.DS_Store
+
+# Local server state / emulator leftovers
+*.pid

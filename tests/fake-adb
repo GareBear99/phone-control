@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+// Fake adb for testing phone-control without a device.
+// Logs input commands to $FAKE_ADB_LOG (default /tmp/ai-finger-test/adb-commands.log).
+//
+// Screencap behaviour (for closed-loop tests):
+// - Each capture returns a 1x1 PNG whose colour depends on a counter stored
+//   in /tmp/ai-finger-test/screencap-count, so consecutive captures have
+//   different bytes (different frame hashes) — the screen "changes".
+// - If /tmp/ai-finger-test/frozen exists, every capture returns the SAME
+//   PNG — the screen does not change.
+// - If /tmp/ai-finger-test/fail-screencap exists, screencap exits 1 with
+//   no output — the device is gone / screencap is failing.
+//
+// Audit addition: EVERY adb invocation (not just input commands) is also
+// logged to $FAKE_ADB_ALL_LOG (default /tmp/ai-finger-test/adb-all.log),
+// so tests can prove the finger-lock check runs before `wm size`,
+// `screencap`, or any input command. The input-only log above is unchanged.
+'use strict';
+const fs = require('node:fs');
+const zlib = require('node:zlib');
+
+const LOG = process.env.FAKE_ADB_LOG || '/tmp/ai-finger-test/adb-commands.log';
+const DIR = '/tmp/ai-finger-test';
+const args = process.argv.slice(2);
+const log = (s) => fs.appendFileSync(LOG, s + '\n');
+const ALL_LOG = process.env.FAKE_ADB_ALL_LOG || '/tmp/ai-finger-test/adb-all.log';
+try { fs.appendFileSync(ALL_LOG, args.join(' ') + '\n'); } catch {}
+
+// --- minimal 1x1 RGB PNG builder (stdlib only) -----------------------------
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function chunk(type, data) {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+  const td = Buffer.concat([Buffer.from(type), data]);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
+  return Buffer.concat([len, td, crc]);
+}
+function png1x1(r, g, b) {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit, RGB
+  const idat = zlib.deflateSync(Buffer.from([0, r, g, b]));
+  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);
+}
+
+function screencap() {
+  if (fs.existsSync(DIR + '/fail-screencap')) process.exit(1);
+  if (fs.existsSync(DIR + '/frozen')) {
+    process.stdout.write(png1x1(0, 0, 0));
+    process.exit(0);
+  }
+  const countFile = DIR + '/screencap-count';
+  let n = 0;
+  try { n = Number(fs.readFileSync(countFile, 'utf8').trim()) || 0; } catch {}
+  fs.writeFileSync(countFile, String(n + 1));
+  // Colour varies with the counter so every capture is a different PNG.
+  process.stdout.write(png1x1(n % 256, (n * 7) % 256, (n * 13) % 256));
+  process.exit(0);
+}
+
+function usage() { process.exit(0); }
+
+if (args[0] === 'devices') {
+  process.stdout.write('List of devices attached\nemulator-5554\tdevice\nemulator-5556\tdevice\n');
+  process.exit(0);
+}
+
+if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'wm' && args[4] === 'size') {
+  process.stdout.write('Physical size: 720x1280\n');
+  process.exit(0);
+}
+
+if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'input') {
+  const sub = args[4];
+  if (sub === 'tap') { log(`tap ${args[5]} ${args[6]}`); process.exit(0); }
+  if (sub === 'swipe') { log(`swipe ${args[5]} ${args[6]} ${args[7]} ${args[8]} ${args[9]}`); process.exit(0); }
+  if (sub === 'text') { log(`text ${args.slice(5).join(' ')}`); process.exit(0); }
+  if (sub === 'keyevent') { log(`keyevent ${args[5]}`); process.exit(0); }
+  process.exit(0);
+}
+
+if (args[0] === '-s' && args[2] === 'exec-out' && args[3] === 'screencap') {
+  screencap();
+}
+
+if (args[0] === '-s' && args[2] === 'shell' && args[3] === 'screencap') {
+  screencap();
+}
+
+usage();

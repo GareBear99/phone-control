@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Control</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #111; color: #eee; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 14px; background: #1c1c1c; position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  #status { font-size: 13px; color: #9fd; }
+  #status.err { color: #f99; }
+  select, input[type=text], button { font-size: 14px; padding: 6px 10px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
+  button { cursor: pointer; }
+  button:hover { background: #333; }
+  main { display: flex; gap: 16px; padding: 14px; align-items: flex-start; }
+  #screenWrap { position: relative; line-height: 0; }
+  #screen { max-height: calc(100vh - 140px); max-width: min(92vw, 480px); border: 1px solid #444; border-radius: 10px; background: #000; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #screen.off { opacity: .35; }
+  #nodata { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #888; font-size: 14px; text-align: center; padding: 20px; line-height: 1.5; }
+  /* AI finger reticle: crosshair + ring, drawn over the screen image. */
+  #reticle { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; pointer-events: none; z-index: 5; display: none; }
+  #reticle::before, #reticle::after { content: ''; position: absolute; background: #22d3ee; }
+  #reticle::before { left: 50%; top: 0; width: 2px; height: 100%; margin-left: -1px; }
+  #reticle::after { top: 50%; left: 0; height: 2px; width: 100%; margin-top: -1px; }
+  #reticle .ring { position: absolute; inset: 8px; border: 2px solid #22d3ee; border-radius: 50%; box-shadow: 0 0 8px rgba(34,211,238,.8); }
+  #reticle.holding::before, #reticle.holding::after { background: #fbbf24; }
+  #reticle.holding .ring { border-color: #fbbf24; box-shadow: 0 0 10px rgba(251,191,36,.9); }
+  /* Finger locked: the reticle goes grey/red — the finger cannot act. */
+  #reticle.locked::before, #reticle.locked::after { background: #f87171; }
+  #reticle.locked .ring { border-color: #f87171; box-shadow: 0 0 8px rgba(248,113,113,.8); }
+  button:disabled, input:disabled { opacity: .45; cursor: not-allowed; }
+  .lockRow { display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 6px 10px; border: 1px solid #444; border-radius: 6px; background: #222; }
+  .lockRow.locked { border-color: #f87171; background: #2a1a1a; }
+  .lockRow input { width: 16px; height: 16px; accent-color: #f87171; }
+  .panel { display: flex; flex-direction: column; gap: 10px; min-width: 220px; }
+  .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row { display: flex; gap: 8px; }
+  .row input { flex: 1; min-width: 0; }
+  .hint { font-size: 12px; color: #999; line-height: 1.5; }
+  @media (max-width: 700px) { main { flex-direction: column; } #screen { max-width: 92vw; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>📱 Phone Control</h1>
+  <label>Device:
+    <select id="device"><option value="">— none —</option></select>
+  </label>
+  <button id="refreshBtn" title="Take a fresh screenshot">⟳ Refresh</button>
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <div id="screenWrap">
+    <img id="screen" alt="phone screen" draggable="false">
+    <div id="reticle" title="AI finger"><div class="ring"></div></div>
+    <div id="nodata">No device connected.<br>Start the emulator or plug in the phone,<br>then pick it above.</div>
+  </div>
+  <div class="panel">
+    <label class="lockRow" id="lockRow" title="Disable/lock the AI finger on this device — a locked finger cannot act at all">
+      <input id="lockToggle" type="checkbox"> 🔒 Finger locked
+    </label>
+    <div class="keys">
+      <button data-key="home">🏠 Home</button>
+      <button data-key="back">← Back</button>
+      <button data-key="recents">▦ Recents</button>
+      <button data-key="power">⏻ Power</button>
+      <button data-key="volup">🔊 Vol +</button>
+      <button data-key="voldown">🔉 Vol −</button>
+    </div>
+    <div class="row">
+      <input id="text" type="text" placeholder="Type text to send…" autocomplete="off">
+      <button id="sendText">Send</button>
+    </div>
+    <div class="row">
+      <label class="hint" for="holdMs" style="align-self:center">Hold&nbsp;(ms)</label>
+      <input id="holdMs" type="number" min="100" max="10000" step="100" value="1000">
+      <button id="holdBtn" title="Press and hold at the finger for this long">✋ Hold at finger</button>
+    </div>
+    <div class="hint" id="fingerPos">AI finger: —</div>
+    <div class="hint" id="verifyLine"></div>
+    <div class="hint">
+      Click the screen to tap. Drag on the screen to swipe/scroll.
+      Right-click moves the AI finger without tapping.<br>
+      Screen refreshes ~3×/second. Coordinates are mapped to the
+      phone's real resolution automatically.
+    </div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const screen = $('screen'), statusEl = $('status'), devSel = $('device'), nodata = $('nodata');
+let deviceSize = null;   // {w,h} of the selected device
+let reticle = null;      // {x,y} AI finger position, device coords
+let selected = null;
+let fingerLocked = false; // per-device finger lock, from /api/status
+let frameTimer = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const t = await r.text();
+  let j = null; try { j = JSON.parse(t); } catch {}
+  if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+  return j;
+}
+
+async function refreshDevices() {
+  try {
+    const { devices, selected: sel } = await api('/api/devices');
+    selected = sel;
+    const cur = devSel.value;
+    devSel.innerHTML = devices.length
+      ? devices.map(d => `<option value="${d.serial}">${d.serial} (${d.state})</option>`).join('')
+      : '<option value="">— none —</option>';
+    devSel.value = sel || (devices[0] && devices[0].serial) || '';
+    if (sel) devSel.value = sel;
+    else if (cur && devices.some(d => d.serial === cur)) devSel.value = cur;
+    updateStatus(devices);
+  } catch (e) { setStatus('server error: ' + e.message, true); }
+}
+
+function setStatus(msg, isErr) {
+  statusEl.textContent = msg;
+  statusEl.className = isErr ? 'err' : '';
+}
+
+async function updateStatus(devices) {
+  try {
+    const s = await api('/api/status');
+    deviceSize = s.size;
+    reticle = s.reticle || null;
+    fingerLocked = !!s.fingerLocked;
+    applyLockUI();
+    positionReticle();
+    updateFingerPos();
+    if (!s.selected) {
+      setStatus(devices && devices.length ? 'device offline — pick one above' : 'no devices found (adb devices is empty)', true);
+      screen.classList.add('off'); nodata.style.display = 'flex';
+    } else {
+      const age = s.frameAgeMs, hash = s.frameHash;
+      let frameTxt = '';
+      if (age != null) {
+        frameTxt = `frame ${hash ? hash.slice(0, 8) + ' · ' : ''}${(age / 1000).toFixed(1)}s old`;
+        if (age > 2000) frameTxt = '⚠ STALE ' + frameTxt + ' — device may be disconnected';
+      }
+      setStatus(`● ${s.selected}  ${s.size ? s.size.w + '×' + s.size.h : ''}  ${frameTxt}`, age != null && age > 2000);
+      screen.classList.remove('off'); nodata.style.display = 'none';
+    }
+  } catch (e) { setStatus('status error: ' + e.message, true); }
+}
+
+// Finger lock UI: the toggle itself always stays usable (it is the way back
+// out of locked). When locked, every input control is disabled/greyed and
+// the reticle shows locked (grey/red) — the finger cannot act. The verify
+// machinery is also off while locked: a locked device has no actions, so
+// there is nothing to verify, and the extra knowing is switched off —
+// latency softens. (The refresh handler below also drops the forced fresh
+// frame while locked.)
+function applyLockUI() {
+  $('lockToggle').checked = fingerLocked;
+  $('lockRow').classList.toggle('locked', fingerLocked);
+  document.querySelectorAll('[data-key]').forEach(b => { b.disabled = fingerLocked; });
+  $('text').disabled = fingerLocked;
+  $('sendText').disabled = fingerLocked;
+  $('holdMs').disabled = fingerLocked;
+  $('holdBtn').disabled = fingerLocked;
+  $('reticle').classList.toggle('locked', fingerLocked);
+}
+
+function pollFrame(fresh) {
+  if (!selected) return;
+  // cache-bust so the browser never serves a stale frame
+  screen.src = '/api/frame?' + (fresh ? 'fresh=1&' : '') + 't=' + Date.now();
+}
+screen.addEventListener('error', () => { /* transient: next poll retries */ });
+
+// --- pointer: click = tap, drag = swipe ------------------------------------
+let drag = null;
+function toDevice(e) {
+  const r = screen.getBoundingClientRect();
+  const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+  if (!deviceSize) return null;
+  return { x: Math.round(fx * deviceSize.w), y: Math.round(fy * deviceSize.h) };
+}
+screen.addEventListener('pointerdown', e => { drag = { start: toDevice(e), moved: false }; screen.setPointerCapture(e.pointerId); });
+screen.addEventListener('pointermove', e => { if (drag && drag.start) drag.moved = true; });
+screen.addEventListener('pointerup', async e => {
+  if (!drag) return;
+  const end = toDevice(e);
+  const start = drag.start; drag = null;
+  if (!start || !end || !selected) return;
+  // Locked: the finger cannot act — no tap, no swipe. (The server also
+  // refuses with 423; this guard keeps the click from doing anything.)
+  if (fingerLocked) { setStatus('finger is locked for this device — unlock it to act', true); return; }
+  try {
+    if (!e.target) return;
+    const moved = Math.hypot(end.x - start.x, end.y - start.y);
+    if (moved < 10) {
+      const r = await api('/api/tap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x: end.x, y: end.y }) });
+      reticle = r.reticle || { x: end.x, y: end.y }; positionReticle(); updateFingerPos();
+      showVerify(r.verify);
+    }
+    else {
+      const r = await api('/api/swipe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x1: start.x, y1: start.y, x2: end.x, y2: end.y, duration: 300 }) });
+      showVerify(r.verify);
+    }
+    pollFrame();
+  } catch (err) { setStatus('input failed: ' + err.message, true); }
+});
+
+// --- AI finger reticle ------------------------------------------------------
+function positionReticle() {
+  const el = $('reticle');
+  if (!reticle || !deviceSize) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.style.left = (reticle.x / deviceSize.w * 100) + '%';
+  el.style.top = (reticle.y / deviceSize.h * 100) + '%';
+}
+function updateFingerPos() {
+  $('fingerPos').textContent = reticle
+    ? `AI finger: ${reticle.x}, ${reticle.y}${fingerLocked ? ' — LOCKED' : ''}`
+    : 'AI finger: —';
+}
+// Closed loop, shown on the page: did the screen actually change after the
+// action? The server compares the frame fingerprint before and after the
+// action; "sent" is not evidence, the screen is.
+function showVerify(v) {
+  const el = $('verifyLine');
+  if (!v) { el.textContent = ''; return; }
+  const short = h => h ? h.slice(0, 8) : '—';
+  if (!v.verified) { el.textContent = '✗ not verified: ' + (v.reason || 'no fresh frame'); el.style.color = '#f99'; return; }
+  if (v.changed === true) { el.textContent = `✓ screen changed ${short(v.before && v.before.hash)} → ${short(v.after && v.after.hash)}`; el.style.color = '#9fd'; }
+  else if (v.changed === false) { el.textContent = `○ screen unchanged ${short(v.after && v.after.hash)}`; el.style.color = '#fbbf24'; }
+  else { el.textContent = 'screen present after action — no earlier frame to compare'; el.style.color = '#9fd'; }
+}
+// Right-click moves the finger without tapping — not while locked.
+screen.addEventListener('contextmenu', async e => {
+  e.preventDefault();
+  const p = toDevice(e);
+  if (!p || !selected) return;
+  if (fingerLocked) { setStatus('finger is locked for this device — unlock it to act', true); return; }
+  try {
+    const r = await api('/api/reticle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x: p.x, y: p.y }) });
+    reticle = r.reticle; positionReticle(); updateFingerPos();
+  } catch (err) { setStatus('reticle failed: ' + err.message, true); }
+});
+$('holdBtn').addEventListener('click', async () => {
+  if (fingerLocked) { setStatus('finger is locked for this device — unlock it to act', true); return; }
+  if (!reticle || !selected) { setStatus('no finger position yet — tap the screen first', true); return; }
+  const duration = Number($('holdMs').value);
+  const el = $('reticle');
+  el.classList.add('holding');
+  try {
+    const r = await api('/api/hold', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x: reticle.x, y: reticle.y, duration }) });
+    showVerify(r.verify);
+    pollFrame();
+  } catch (err) { setStatus('hold failed: ' + err.message, true); }
+  finally { el.classList.remove('holding'); }
+});
+
+// The lock toggle: always usable, even when locked — it is the way back
+// out. The server is the source of truth; on failure the checkbox reverts
+// to the server's state.
+$('lockToggle').addEventListener('change', async () => {
+  const locked = $('lockToggle').checked;
+  try {
+    const r = await api('/api/finger-lock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locked }) });
+    fingerLocked = r.locked;
+    applyLockUI(); updateFingerPos();
+    setStatus(`finger ${r.locked ? 'locked' : 'unlocked'} for ${r.serial}`, false);
+  } catch (err) {
+    setStatus('lock failed: ' + err.message, true);
+    $('lockToggle').checked = fingerLocked;
+  }
+});
+
+// --- keys, text, refresh ----------------------------------------------------
+document.querySelectorAll('[data-key]').forEach(b => b.addEventListener('click', async () => {
+  try { await api('/api/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: b.dataset.key }) }); pollFrame(); }
+  catch (err) { setStatus('key failed: ' + err.message, true); }
+}));
+async function sendText() {
+  const v = $('text').value;
+  if (!v) return;
+  try { await api('/api/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: v }) }); $('text').value = ''; pollFrame(); }
+  catch (err) { setStatus('text failed: ' + err.message, true); }
+}
+$('sendText').addEventListener('click', sendText);
+$('text').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
+$('refreshBtn').addEventListener('click', () => {
+  // Verification is off while locked: no forced fresh frame. A locked
+  // device has no actions to verify, so the extra knowing is switched off
+  // and the refresh is just a plain poll — latency softens. Seeing the
+  // screen is never locked; only acting (and verifying actions) is.
+  if (fingerLocked) pollFrame(); else pollFrame(true);
+  updateStatus();
+});
+devSel.addEventListener('change', async () => {
+  try { const r = await api('/api/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serial: devSel.value }) }); selected = r.selected; pollFrame(); updateStatus(); }
+  catch (err) { setStatus('select failed: ' + err.message, true); refreshDevices(); }
+});
+
+// --- loops -------------------------------------------------------------------
+(async function init() {
+  await refreshDevices();
+  frameTimer = setInterval(pollFrame, 350);
+  setInterval(refreshDevices, 5000);   // pick up newly plugged-in devices
+  pollFrame();
+})();
+</script>
+</body>
+</html>
